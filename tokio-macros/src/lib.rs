@@ -57,6 +57,15 @@ use proc_macro::TokenStream;
 /// # async fn main() {}
 /// ```
 ///
+/// # Access the runtime
+///
+/// To access the runtime via a local variable, the macro can be configured using
+///
+/// ```
+/// #[tokio::main(local_var = "myrt")]
+/// # async fn main() {}
+/// ```
+///
 /// ## Function arguments:
 ///
 /// Arguments are allowed for any functions aside from `main` which is special
@@ -132,6 +141,31 @@ use proc_macro::TokenStream;
 ///         .block_on(async {
 ///             println!("Hello world");
 ///         })
+/// }
+/// ```
+///
+/// ### Access the created runtime
+///
+/// ```rust
+/// #[tokio::main(local_var = "myrt")]
+/// async fn main() {
+///     let _g = myrt.enter();
+///     println!("Hello world");
+/// }
+/// ```
+///
+/// Equivalent code not using `#[tokio::main]`
+///
+/// ```rust
+/// fn main() {
+///     let myrt = tokio::runtime::Builder::new_multi_thread()
+///         .enable_all()
+///         .build()
+///         .unwrap();
+///     myrt.block_on(async {
+///         let _g = myrt.enter();
+///         println!("Hello world");
+///     })
 /// }
 /// ```
 ///

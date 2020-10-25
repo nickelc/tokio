@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use proc_macro2::Span;
+use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::spanned::Spanned;
 
@@ -25,6 +25,7 @@ impl RuntimeFlavor {
 struct FinalConfig {
     flavor: RuntimeFlavor,
     worker_threads: Option<usize>,
+    rt_var: Option<Ident>,
 }
 
 struct Configuration {
@@ -32,6 +33,7 @@ struct Configuration {
     default_flavor: RuntimeFlavor,
     flavor: Option<RuntimeFlavor>,
     worker_threads: Option<(usize, Span)>,
+    rt_var: Option<Ident>,
 }
 
 impl Configuration {
@@ -44,6 +46,7 @@ impl Configuration {
             },
             flavor: None,
             worker_threads: None,
+            rt_var: None,
         }
     }
 
@@ -79,6 +82,16 @@ impl Configuration {
         Ok(())
     }
 
+    fn set_local_var(&mut self, varname: syn::Lit, span: Span) -> Result<(), syn::Error> {
+        if self.rt_var.is_some() {
+            return Err(syn::Error::new(span, "`local_var` set multiple times."));
+        }
+        let varname_str = parse_string(varname, span, "local_var")?;
+        let varname = quote::format_ident!("{}", span = span, varname_str);
+        self.rt_var = Some(varname);
+        Ok(())
+    }
+
     fn build(&self) -> Result<FinalConfig, syn::Error> {
         let flavor = self.flavor.unwrap_or(self.default_flavor);
         use RuntimeFlavor::*;
@@ -90,10 +103,12 @@ impl Configuration {
             (CurrentThread, None) => Ok(FinalConfig {
                 flavor,
                 worker_threads: None,
+                rt_var: self.rt_var.clone(),
             }),
             (Threaded, worker_threads) if self.rt_multi_thread_available => Ok(FinalConfig {
                 flavor,
                 worker_threads: worker_threads.map(|(val, _span)| val),
+                rt_var: self.rt_var.clone(),
             }),
             (Threaded, _) => {
                 let msg = if self.flavor.is_none() {
@@ -174,12 +189,15 @@ fn parse_knobs(
                     "flavor" => {
                         config.set_flavor(namevalue.lit.clone(), namevalue.span())?;
                     }
+                    "local_var" => {
+                        config.set_local_var(namevalue.lit.clone(), namevalue.span())?;
+                    }
                     "core_threads" => {
                         let msg = "Attribute `core_threads` is renamed to `worker_threads`";
                         return Err(syn::Error::new_spanned(namevalue, msg));
                     }
                     name => {
-                        let msg = format!("Unknown attribute {} is specified; expected one of: `flavor`, `worker_threads`", name);
+                        let msg = format!("Unknown attribute {} is specified; expected one of: `flavor`, `worker_threads`, `local_var`", name);
                         return Err(syn::Error::new_spanned(namevalue, msg));
                     }
                 }
@@ -198,11 +216,11 @@ fn parse_knobs(
                     "basic_scheduler" | "current_thread" | "single_threaded" => {
                         format!("Set the runtime flavor with #[{}(flavor = \"current_thread\")].", macro_name)
                     },
-                    "flavor" | "worker_threads" => {
+                    "flavor" | "worker_threads" | "local_var" => {
                         format!("The `{}` attribute requires an argument.", name)
                     },
                     name => {
-                        format!("Unknown attribute {} is specified; expected one of: `flavor`, `worker_threads`", name)
+                        format!("Unknown attribute {} is specified; expected one of: `flavor`, `worker_threads`, `local_var`", name)
                     },
                 };
                 return Err(syn::Error::new_spanned(path, msg));
@@ -230,6 +248,27 @@ fn parse_knobs(
         rt = quote! { #rt.worker_threads(#v) };
     }
 
+    let new_body = {
+        if let Some(varname) = config.rt_var {
+            quote! {
+                let #varname = #rt
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                #varname.block_on(async { #body })
+            }
+        } else {
+            quote! {
+                #rt
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async { #body })
+            }
+        }
+    };
+
     let header = {
         if is_test {
             quote! {
@@ -240,15 +279,13 @@ fn parse_knobs(
         }
     };
 
-    let result = quote! {
-        #header
-        #(#attrs)*
-        #vis #sig {
-            #rt
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async { #body })
+    let result = {
+        quote! {
+            #header
+            #(#attrs)*
+            #vis #sig {
+                #new_body
+            }
         }
     };
 
